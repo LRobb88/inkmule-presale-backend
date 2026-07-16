@@ -1,40 +1,40 @@
 /**
- * InkMule Pre-Sale Store Request — form handler
- * Mirrors the Art Request backend: accepts a multipart POST from the
- * pre-sale request form and emails the submission (with the uploaded
- * logo + product file attached) to your team. No third-party form
- * service, no attachment size caps beyond what you set here.
+ * InkMule Pre-Sale Store Request — form handler (SendGrid Web API)
+ * Same approach as your Art Request backend: authenticates with a single
+ * SendGrid API key (no SMTP host/user/password). Accepts the multipart
+ * POST from the pre-sale request form and emails you each submission with
+ * the uploaded logo + product file attached.
  *
  * Deploy to Railway exactly like inkmule-art-request-production.
- * Set the environment variables listed in .env.example.
  */
 
 const express = require('express');
 const multer = require('multer');
-const nodemailer = require('nodemailer');
 const cors = require('cors');
+const sgMail = require('@sendgrid/mail');
 
 const app = express();
 
 // ---- Config ---------------------------------------------------------------
 const {
-  SMTP_HOST,
-  SMTP_PORT = '587',
-  SMTP_USER,
-  SMTP_PASS,
-  MAIL_TO,                       // where submissions are emailed (comma-separated OK)
-  MAIL_FROM,                     // the "from" address (often same as SMTP_USER)
-  ALLOWED_ORIGIN = 'https://www.inkmule.com',
-  MAX_FILE_MB = '25',
+  SENDGRID_API_KEY,                       // same key as your art-request service
+  ALLOWED_ORIGIN = 'https://www.inkmule.com,https://inkmule.com',
+  MAX_FILE_MB = '20',                     // SendGrid caps total message ~30 MB
   PORT = '3000',
 } = process.env;
 
-// Allow the form's origin(s) to POST here via fetch (comma-separated list OK).
+// Where submissions are emailed, and the (SendGrid-verified) "from" address.
+// Set these as Railway variables, OR just hard-code them right here.
+const MAIL_TO = process.env.MAIL_TO || 'REPLACE_WITH_YOUR_INBOX@inkmule.com';
+const MAIL_FROM = process.env.MAIL_FROM || 'REPLACE_WITH_VERIFIED_SENDER@inkmule.com';
+
+if (SENDGRID_API_KEY) sgMail.setApiKey(SENDGRID_API_KEY);
+
+// Allow the form's origin(s) to POST here (comma-separated list OK).
 const allowedOrigins = ALLOWED_ORIGIN.split(',').map((s) => s.trim());
 app.use(
   cors({
     origin(origin, cb) {
-      // allow same-origin / curl (no origin) and any configured origin
       if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
       return cb(null, false);
     },
@@ -48,36 +48,16 @@ const upload = multer({
   limits: { fileSize: parseInt(MAX_FILE_MB, 10) * 1024 * 1024 },
 });
 
-// Reusable SMTP transport.
-const transporter = nodemailer.createTransport({
-  host: SMTP_HOST,
-  port: parseInt(SMTP_PORT, 10),
-  secure: parseInt(SMTP_PORT, 10) === 465, // true for 465, false for 587/25
-  auth: SMTP_USER ? { user: SMTP_USER, pass: SMTP_PASS } : undefined,
-});
-
 // Human-friendly label order for the email body.
 const FIELD_ORDER = [
-  'Full Name',
-  'Email',
-  'Company / Organization',
-  'Phone',
-  'Store Name',
-  'Desired URL',
-  'Public Store',
-  'Requested Open Date',
-  'Requested Close Date',
-  'Fulfillment',
-  'Collect Payment',
-  '2XL Upcharge',
-  'Order Notification Email',
+  'Full Name', 'Email', 'Company / Organization', 'Phone',
+  'Store Name', 'Desired URL', 'Public Store',
+  'Requested Open Date', 'Requested Close Date',
+  'Fulfillment', 'Collect Payment', '2XL Upcharge', 'Order Notification Email',
   'Additional Notes',
-  'Agree: Read Best Practices',
-  'Agree: Store Window & Production',
-  'Agree: All Sales Final',
-  'Agree: Order Minimums',
-  'Agree: Artwork & IP',
-  'Agree: Payment',
+  'Agree: Read Best Practices', 'Agree: Store Window & Production',
+  'Agree: All Sales Final', 'Agree: Order Minimums',
+  'Agree: Artwork & IP', 'Agree: Payment',
 ];
 
 function buildBody(fields) {
@@ -90,7 +70,6 @@ function buildBody(fields) {
     seen.add(k);
   };
   FIELD_ORDER.forEach(push);
-  // Include anything unexpected we didn't map, except the honeypot.
   Object.keys(fields).forEach((k) => {
     if (seen.has(k) || k === '_gotcha') return;
     push(k);
@@ -107,16 +86,15 @@ function buildHtml(fields) {
       const i = line.indexOf(': ');
       const k = esc(line.slice(0, i));
       const v = esc(line.slice(i + 2)).replace(/\n/g, '<br>');
-      return `<tr><td style="padding:6px 12px;font-weight:600;color:#0e4d4d;vertical-align:top;white-space:nowrap;">${k}</td><td style="padding:6px 12px;color:#2b2b28;">${v}</td></tr>`;
+      return `<tr><td style="padding:6px 12px;font-weight:600;color:#005D63;vertical-align:top;white-space:nowrap;">${k}</td><td style="padding:6px 12px;color:#1a1a1a;">${v}</td></tr>`;
     })
     .join('');
   return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;">
-    <h2 style="color:#0e4d4d;margin:0 0 12px;">New Pre-Sale Store Request</h2>
+    <h2 style="color:#005D63;margin:0 0 12px;">New Pre-Sale Store Request</h2>
     <table style="border-collapse:collapse;">${rows}</table>
   </div>`;
 }
 
-// Branded thank-you page shown after a normal (non-AJAX) form submit.
 const THANK_YOU_HTML = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -134,22 +112,26 @@ const THANK_YOU_HTML = `<!DOCTYPE html>
 app.get('/', (_req, res) => res.status(200).send('InkMule pre-sale form handler is running.'));
 
 app.post('/submit', upload.any(), async (req, res) => {
+  const wantsJson = (req.headers.accept || '').includes('application/json');
   try {
     // Honeypot: silently accept + drop obvious bots.
-    if (req.body && req.body._gotcha) return res.status(200).json({ success: true });
+    if (req.body && req.body._gotcha) {
+      return wantsJson ? res.status(200).json({ success: true }) : res.status(200).send(THANK_YOU_HTML);
+    }
 
     const attachments = (req.files || []).map((f) => ({
+      content: f.buffer.toString('base64'),
       filename: `${f.fieldname} - ${f.originalname}`,
-      content: f.buffer,
-      contentType: f.mimetype,
+      type: f.mimetype,
+      disposition: 'attachment',
     }));
 
     const submitterEmail = (req.body.Email || '').trim();
     const storeName = (req.body['Store Name'] || 'Pre-Sale Store').trim();
 
-    await transporter.sendMail({
-      from: MAIL_FROM || SMTP_USER,
-      to: MAIL_TO,
+    await sgMail.send({
+      to: MAIL_TO.split(',').map((s) => s.trim()),
+      from: MAIL_FROM,
       replyTo: submitterEmail || undefined,
       subject: `New Pre-Sale Store Request — ${storeName}`,
       text: buildBody(req.body),
@@ -157,17 +139,12 @@ app.post('/submit', upload.any(), async (req, res) => {
       attachments,
     });
 
-    // fetch() clients get JSON; plain form posts get a branded thank-you page.
-    if ((req.headers.accept || '').includes('application/json')) {
-      return res.status(200).json({ success: true });
-    }
-    return res.status(200).send(THANK_YOU_HTML);
+    return wantsJson ? res.status(200).json({ success: true }) : res.status(200).send(THANK_YOU_HTML);
   } catch (err) {
-    console.error('Submit error:', err);
-    if ((req.headers.accept || '').includes('application/json')) {
-      return res.status(500).json({ success: false, message: 'Failed to send' });
-    }
-    return res.status(500).send('Sorry, something went wrong. Please try again or call 833-465-6853.');
+    console.error('Submit error:', err && err.response ? err.response.body : err);
+    return wantsJson
+      ? res.status(500).json({ success: false, message: 'Failed to send' })
+      : res.status(500).send('Sorry, something went wrong. Please try again or call 833-465-6853.');
   }
 });
 
