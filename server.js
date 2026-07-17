@@ -111,6 +111,31 @@ const THANK_YOU_HTML = `<!DOCTYPE html>
 // ---- Routes ---------------------------------------------------------------
 app.get('/', (_req, res) => res.status(200).send('InkMule pre-sale form handler is running.'));
 
+// Diagnostic: open this in a browser to see config + the exact SendGrid error.
+// Safe to leave in place; it never exposes the API key value.
+app.get('/diag', async (_req, res) => {
+  const info = {
+    SENDGRID_API_KEY_set: Boolean(SENDGRID_API_KEY),
+    MAIL_FROM,
+    MAIL_TO,
+    from_is_placeholder: MAIL_FROM.includes('REPLACE_WITH'),
+    to_is_placeholder: MAIL_TO.includes('REPLACE_WITH'),
+  };
+  try {
+    await sgMail.send({
+      to: MAIL_TO.split(',').map((s) => s.trim()),
+      from: MAIL_FROM,
+      subject: 'InkMule pre-sale form — test email',
+      text: 'Test from /diag. If you got this, email is working.',
+    });
+    info.test_send = 'SUCCESS — check the MAIL_TO inbox';
+  } catch (err) {
+    info.test_send = 'FAILED';
+    info.error = err && err.response && err.response.body ? err.response.body : String(err);
+  }
+  res.status(200).json(info);
+});
+
 app.post('/submit', upload.any(), async (req, res) => {
   const wantsJson = (req.headers.accept || '').includes('application/json');
   try {
