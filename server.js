@@ -1,12 +1,12 @@
 /**
- * InkMule Pre-Sale Store Request — form handler (SMTP via Nodemailer)
+ * InkMule Pre-Sale Store Request — form handler (Resend HTTPS API)
  * Accepts the multipart POST from the pre-sale request form and emails you
  * each submission with the uploaded logo + product file attached.
  *
- * Sends mail over plain SMTP instead of the SendGrid Web API — no SendGrid
- * account or credits required. Works with Gmail / Google Workspace (App
- * Password), Microsoft 365, or any other SMTP provider — just set the
- * SMTP_* variables below.
+ * Sends mail via the Resend HTTPS API (https://resend.com) — NOT raw SMTP.
+ * Railway blocks outbound SMTP (ports 465/587) on Free/Trial/Hobby plans;
+ * only HTTPS-based transactional email services work there, which is why
+ * this uses Resend's API instead of Nodemailer/SMTP.
  *
  * Deploy to Railway exactly like before; only the mail-sending step changed.
  */
@@ -14,44 +14,26 @@
 const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
 
 const app = express();
 
 // ---- Config ---------------------------------------------------------------
 const {
-  SMTP_HOST,                              // e.g. smtp.gmail.com
-  SMTP_PORT = '465',                      // 465 = SSL, 587 = STARTTLS
-  SMTP_SECURE,                            // 'true' for port 465, 'false' for 587 (auto-guessed below if unset)
-  SMTP_USER,                              // the mailbox that authenticates, e.g. contact@inkmule.com
-  SMTP_PASS,                              // app password / SMTP password (NOT the regular login password for Gmail/Workspace)
+  RESEND_API_KEY,                         // from https://resend.com/api-keys
   ALLOWED_ORIGIN = 'https://www.inkmule.com,https://inkmule.com',
-  MAX_FILE_MB = '20',                     // most mailboxes cap total message size ~25 MB
+  MAX_FILE_MB = '20',                     // Resend caps total request size ~40 MB
   PORT = '3000',
 } = process.env;
 
-// Where submissions are emailed, and the "from" address (usually same as SMTP_USER).
-// Set these as Railway variables, OR just hard-code them right here.
+// Where submissions are emailed, and the "from" address.
+// MAIL_FROM's domain must be verified in Resend (https://resend.com/domains)
+// before you can send from it — e.g. contact@inkmule.com requires
+// inkmule.com to be verified there first.
 const MAIL_TO = process.env.MAIL_TO || 'REPLACE_WITH_YOUR_INBOX@inkmule.com';
-const MAIL_FROM = process.env.MAIL_FROM || SMTP_USER || 'REPLACE_WITH_VERIFIED_SENDER@inkmule.com';
+const MAIL_FROM = process.env.MAIL_FROM || 'REPLACE_WITH_VERIFIED_SENDER@inkmule.com';
 
-const smtpSecure =
-  SMTP_SECURE !== undefined ? SMTP_SECURE === 'true' : parseInt(SMTP_PORT, 10) === 465;
-
-const transporter =
-  SMTP_HOST && SMTP_USER && SMTP_PASS
-    ? nodemailer.createTransport({
-        host: SMTP_HOST,
-        port: parseInt(SMTP_PORT, 10),
-        secure: smtpSecure,
-        auth: { user: SMTP_USER, pass: SMTP_PASS },
-        // Fail fast with a clear error instead of hanging forever if the
-        // host/port is wrong or the network can't reach it.
-        connectionTimeout: 10000,
-        greetingTimeout: 10000,
-        socketTimeout: 10000,
-      })
-    : null;
+const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
 
 // Allow the form's origin(s) to POST here (comma-separated list OK).
 const allowedOrigins = ALLOWED_ORIGIN.split(',').map((s) => s.trim());
@@ -132,32 +114,33 @@ const THANK_YOU_HTML = `<!DOCTYPE html>
 </body></html>`;
 
 async function sendMail({ replyTo, subject, text, html, attachments }) {
-  if (!transporter) {
-    throw new Error('SMTP is not configured (missing SMTP_HOST / SMTP_USER / SMTP_PASS).');
+  if (!resend) {
+    throw new Error('Resend is not configured (missing RESEND_API_KEY).');
   }
-  return transporter.sendMail({
-    to: MAIL_TO.split(',').map((s) => s.trim()),
+  const { data, error } = await resend.emails.send({
     from: MAIL_FROM,
+    to: MAIL_TO.split(',').map((s) => s.trim()),
     replyTo: replyTo || undefined,
     subject,
     text,
     html,
     attachments,
   });
+  if (error) {
+    // Resend returns a structured error object rather than throwing.
+    throw new Error(typeof error === 'string' ? error : JSON.stringify(error));
+  }
+  return data;
 }
 
 // ---- Routes ---------------------------------------------------------------
 app.get('/', (_req, res) => res.status(200).send('InkMule pre-sale form handler is running.'));
 
-// Diagnostic: open this in a browser to see config + the exact SMTP error.
-// Safe to leave in place; it never exposes the SMTP password value.
+// Diagnostic: open this in a browser to see config + the exact Resend error.
+// Safe to leave in place; it never exposes the API key value.
 app.get('/diag', async (_req, res) => {
   const info = {
-    SMTP_HOST,
-    SMTP_PORT,
-    SMTP_secure_used: smtpSecure,
-    SMTP_USER_set: Boolean(SMTP_USER),
-    SMTP_PASS_set: Boolean(SMTP_PASS),
+    RESEND_API_KEY_set: Boolean(RESEND_API_KEY),
     MAIL_FROM,
     MAIL_TO,
     from_is_placeholder: MAIL_FROM.includes('REPLACE_WITH'),
@@ -167,6 +150,7 @@ app.get('/diag', async (_req, res) => {
     await sendMail({
       subject: 'InkMule pre-sale form — test email',
       text: 'Test from /diag. If you got this, email is working.',
+      html: '<p>Test from /diag. If you got this, email is working.</p>',
     });
     info.test_send = 'SUCCESS — check the MAIL_TO inbox';
   } catch (err) {
@@ -185,9 +169,8 @@ app.post('/submit', upload.any(), async (req, res) => {
     }
 
     const attachments = (req.files || []).map((f) => ({
-      content: f.buffer,
       filename: `${f.fieldname} - ${f.originalname}`,
-      contentType: f.mimetype,
+      content: f.buffer.toString('base64'),
     }));
 
     const submitterEmail = (req.body.Email || '').trim();
