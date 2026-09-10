@@ -45,6 +45,11 @@ const transporter =
         port: parseInt(SMTP_PORT, 10),
         secure: smtpSecure,
         auth: { user: SMTP_USER, pass: SMTP_PASS },
+        // Fail fast with a clear error instead of hanging forever if the
+        // host/port is wrong or the network can't reach it.
+        connectionTimeout: 10000,
+        greetingTimeout: 10000,
+        socketTimeout: 10000,
       })
     : null;
 
