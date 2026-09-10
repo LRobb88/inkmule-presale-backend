@@ -1,34 +1,52 @@
 /**
- * InkMule Pre-Sale Store Request — form handler (SendGrid Web API)
- * Same approach as your Art Request backend: authenticates with a single
- * SendGrid API key (no SMTP host/user/password). Accepts the multipart
- * POST from the pre-sale request form and emails you each submission with
- * the uploaded logo + product file attached.
+ * InkMule Pre-Sale Store Request — form handler (SMTP via Nodemailer)
+ * Accepts the multipart POST from the pre-sale request form and emails you
+ * each submission with the uploaded logo + product file attached.
  *
- * Deploy to Railway exactly like inkmule-art-request-production.
+ * Sends mail over plain SMTP instead of the SendGrid Web API — no SendGrid
+ * account or credits required. Works with Gmail / Google Workspace (App
+ * Password), Microsoft 365, or any other SMTP provider — just set the
+ * SMTP_* variables below.
+ *
+ * Deploy to Railway exactly like before; only the mail-sending step changed.
  */
 
 const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
-const sgMail = require('@sendgrid/mail');
+const nodemailer = require('nodemailer');
 
 const app = express();
 
 // ---- Config ---------------------------------------------------------------
 const {
-  SENDGRID_API_KEY,                       // same key as your art-request service
+  SMTP_HOST,                              // e.g. smtp.gmail.com
+  SMTP_PORT = '465',                      // 465 = SSL, 587 = STARTTLS
+  SMTP_SECURE,                            // 'true' for port 465, 'false' for 587 (auto-guessed below if unset)
+  SMTP_USER,                              // the mailbox that authenticates, e.g. contact@inkmule.com
+  SMTP_PASS,                              // app password / SMTP password (NOT the regular login password for Gmail/Workspace)
   ALLOWED_ORIGIN = 'https://www.inkmule.com,https://inkmule.com',
-  MAX_FILE_MB = '20',                     // SendGrid caps total message ~30 MB
+  MAX_FILE_MB = '20',                     // most mailboxes cap total message size ~25 MB
   PORT = '3000',
 } = process.env;
 
-// Where submissions are emailed, and the (SendGrid-verified) "from" address.
+// Where submissions are emailed, and the "from" address (usually same as SMTP_USER).
 // Set these as Railway variables, OR just hard-code them right here.
 const MAIL_TO = process.env.MAIL_TO || 'REPLACE_WITH_YOUR_INBOX@inkmule.com';
-const MAIL_FROM = process.env.MAIL_FROM || 'REPLACE_WITH_VERIFIED_SENDER@inkmule.com';
+const MAIL_FROM = process.env.MAIL_FROM || SMTP_USER || 'REPLACE_WITH_VERIFIED_SENDER@inkmule.com';
 
-if (SENDGRID_API_KEY) sgMail.setApiKey(SENDGRID_API_KEY);
+const smtpSecure =
+  SMTP_SECURE !== undefined ? SMTP_SECURE === 'true' : parseInt(SMTP_PORT, 10) === 465;
+
+const transporter =
+  SMTP_HOST && SMTP_USER && SMTP_PASS
+    ? nodemailer.createTransport({
+        host: SMTP_HOST,
+        port: parseInt(SMTP_PORT, 10),
+        secure: smtpSecure,
+        auth: { user: SMTP_USER, pass: SMTP_PASS },
+      })
+    : null;
 
 // Allow the form's origin(s) to POST here (comma-separated list OK).
 const allowedOrigins = ALLOWED_ORIGIN.split(',').map((s) => s.trim());
@@ -108,30 +126,47 @@ const THANK_YOU_HTML = `<!DOCTYPE html>
   </div>
 </body></html>`;
 
+async function sendMail({ replyTo, subject, text, html, attachments }) {
+  if (!transporter) {
+    throw new Error('SMTP is not configured (missing SMTP_HOST / SMTP_USER / SMTP_PASS).');
+  }
+  return transporter.sendMail({
+    to: MAIL_TO.split(',').map((s) => s.trim()),
+    from: MAIL_FROM,
+    replyTo: replyTo || undefined,
+    subject,
+    text,
+    html,
+    attachments,
+  });
+}
+
 // ---- Routes ---------------------------------------------------------------
 app.get('/', (_req, res) => res.status(200).send('InkMule pre-sale form handler is running.'));
 
-// Diagnostic: open this in a browser to see config + the exact SendGrid error.
-// Safe to leave in place; it never exposes the API key value.
+// Diagnostic: open this in a browser to see config + the exact SMTP error.
+// Safe to leave in place; it never exposes the SMTP password value.
 app.get('/diag', async (_req, res) => {
   const info = {
-    SENDGRID_API_KEY_set: Boolean(SENDGRID_API_KEY),
+    SMTP_HOST,
+    SMTP_PORT,
+    SMTP_secure_used: smtpSecure,
+    SMTP_USER_set: Boolean(SMTP_USER),
+    SMTP_PASS_set: Boolean(SMTP_PASS),
     MAIL_FROM,
     MAIL_TO,
     from_is_placeholder: MAIL_FROM.includes('REPLACE_WITH'),
     to_is_placeholder: MAIL_TO.includes('REPLACE_WITH'),
   };
   try {
-    await sgMail.send({
-      to: MAIL_TO.split(',').map((s) => s.trim()),
-      from: MAIL_FROM,
+    await sendMail({
       subject: 'InkMule pre-sale form — test email',
       text: 'Test from /diag. If you got this, email is working.',
     });
     info.test_send = 'SUCCESS — check the MAIL_TO inbox';
   } catch (err) {
     info.test_send = 'FAILED';
-    info.error = err && err.response && err.response.body ? err.response.body : String(err);
+    info.error = String((err && err.message) || err);
   }
   res.status(200).json(info);
 });
@@ -145,19 +180,16 @@ app.post('/submit', upload.any(), async (req, res) => {
     }
 
     const attachments = (req.files || []).map((f) => ({
-      content: f.buffer.toString('base64'),
+      content: f.buffer,
       filename: `${f.fieldname} - ${f.originalname}`,
-      type: f.mimetype,
-      disposition: 'attachment',
+      contentType: f.mimetype,
     }));
 
     const submitterEmail = (req.body.Email || '').trim();
     const storeName = (req.body['Store Name'] || 'Pre-Sale Store').trim();
 
-    await sgMail.send({
-      to: MAIL_TO.split(',').map((s) => s.trim()),
-      from: MAIL_FROM,
-      replyTo: submitterEmail || undefined,
+    await sendMail({
+      replyTo: submitterEmail,
       subject: `New Pre-Sale Store Request — ${storeName}`,
       text: buildBody(req.body),
       html: buildHtml(req.body),
@@ -166,7 +198,7 @@ app.post('/submit', upload.any(), async (req, res) => {
 
     return wantsJson ? res.status(200).json({ success: true }) : res.status(200).send(THANK_YOU_HTML);
   } catch (err) {
-    console.error('Submit error:', err && err.response ? err.response.body : err);
+    console.error('Submit error:', err);
     return wantsJson
       ? res.status(500).json({ success: false, message: 'Failed to send' })
       : res.status(500).send('Sorry, something went wrong. Please try again or call 833-465-6853.');
