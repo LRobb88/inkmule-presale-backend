@@ -1,0 +1,249 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Inter:wght@400;500;600;700&display=swap"><link rel="stylesheet" href="/css/app.css"><link rel="icon" href="/img/icon.svg">
+<meta name="robots" content="noindex">
+<title>Your proof · Inkmule</title>
+<style>
+  body { background: #f1ede9; }
+  .pbar { background: var(--teal); color: #fff; padding: 14px 20px; display: flex; align-items: center; gap: 14px; }
+  .pbar .wm { font-family: 'DM Serif Display', Georgia, serif; font-size: 24px; }
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 20px; }
+  .item { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 20px; align-items: start; margin-top: 22px; scroll-margin-top: 12px; }
+  @media (max-width: 900px) { .wrap { padding: 12px; } .item { grid-template-columns: 1fr; gap: 12px; } }
+  .item-head { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
+  .item-head img { width: 56px; height: 56px; object-fit: contain; background: #f6f3f0; border-radius: 8px; }
+  .jump { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  .jump a { text-decoration: none; color: inherit; border: 1px solid var(--line); background: #fff; border-radius: 999px; padding: 5px 12px; font-size: 13px; display: inline-flex; gap: 6px; align-items: center; }
+  .viewer { background: #fff; border-radius: 12px; box-shadow: var(--shadow); padding: 14px; min-height: 300px; }
+  .viewer canvas, .viewer img { width: 100%; height: auto; display: block; border-radius: 4px; }
+  .viewer canvas + canvas { margin-top: 12px; border-top: 1px solid #eee; }
+  .panel { position: sticky; top: 16px; }
+  @media (max-width: 900px) { .panel { position: static; } }
+  .ack { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 8px; background: var(--warn-tint); color: #5c3a00; cursor: pointer; font-size: 13.5px; }
+  .ack + .ack { margin-top: 6px; }
+  .ack input { margin-top: 2px; width: 17px; height: 17px; flex: none; accent-color: var(--teal); }
+  .vtabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+  .vtabs button.on { background: var(--teal); color: #fff; border-color: var(--teal); }
+  .big { width: 100%; justify-content: center; padding: 11px; font-size: 15px; }
+  .pitem { display: flex; gap: 10px; align-items: center; font-size: 13px; padding: 6px 0; }
+  .pitem img { width: 44px; height: 44px; object-fit: contain; background: #f6f3f0; border-radius: 6px; }
+</style></head>
+<body>
+<div class="pbar"><span class="wm">inkmule</span><span style="opacity:.8">Proof review</span></div>
+<div id="previewBanner" class="hidden" style="background:var(--orange);color:#fff;text-align:center;padding:6px;font-size:13px">Staff preview — this is what the client sees. Views here aren't counted.</div>
+<div class="wrap" id="root"><div class="empty"><span class="spin"></span></div></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+(function () {
+  const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  // Escape text and turn any URLs in it into clickable links (opens in a new tab).
+  const linkify = (text) => esc(text).replace(/\b(https?:\/\/|www\.)[^\s<]+/gi, (m) => {
+    let url = m.split(/&quot;|&#39;|&lt;|&gt;/)[0];
+    let tail = m.slice(url.length);
+    // Leave trailing punctuation (and an unmatched closing paren) outside the link.
+    for (;;) {
+      const last = url.slice(-1);
+      const unbalanced = last === ')' && (url.match(/\(/g) || []).length < (url.match(/\)/g) || []).length;
+      if (!/[.,;:!?\]]/.test(last) && !unbalanced) break;
+      tail = last + tail;
+      url = url.slice(0, -1);
+    }
+    const href = /^www\./i.test(url) ? `https://${url}` : url;
+    return `<a href="${href}" target="_blank" rel="noopener noreferrer" style="word-break:break-all">${url}</a>${tail}`;
+  });
+  const token = location.pathname.split('/')[2];
+  const preview = new URLSearchParams(location.search).get('preview') === '1';
+  const root = document.getElementById('root');
+  const fmt = (d) => new Date(d).toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+  if (window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  let data;
+  let signer = '';
+  const selected = {}; // itemId -> versionId being viewed
+
+  const stateOf = (it) => {
+    const v = it.versions[0];
+    if (!v) return 'none';
+    if (v.response) return v.response.action === 'approved' ? 'approved' : 'changes';
+    return 'pending';
+  };
+  const STATE = { none: ['Proof coming soon', ''], pending: ['Needs your review', 'orange'], approved: ['✓ Approved', 'ok'], changes: ['Changes requested', 'bad'] };
+  const stateBadge = (st) => `<span class="badge ${STATE[st][1]}">${STATE[st][0]}</span>`;
+
+  async function load() {
+    const res = await fetch(`/api/public/${token}${preview ? '?preview=1' : ''}`, { credentials: 'same-origin' });
+    data = await res.json();
+    if (!res.ok) { root.innerHTML = `<div class="empty">${esc(data.error || 'Proof not found')}</div>`; return; }
+    if (data.preview) document.getElementById('previewBanner').classList.remove('hidden');
+    document.title = `${data.job_name} · Proof · Inkmule`;
+    render();
+  }
+
+  function render() {
+    const items = data.items;
+    const withProofs = items.filter((it) => it.versions.length);
+    if (!withProofs.length) {
+      root.innerHTML = `<div class="card pad" style="text-align:center"><h1>${esc(data.job_name)}</h1><p class="muted">Your proof isn't ready yet. We'll email you as soon as it is.</p></div>`;
+      return;
+    }
+    const states = items.map(stateOf);
+    const pending = states.filter((s) => s === 'pending').length;
+    const approved = states.filter((s) => s === 'approved').length;
+    root.innerHTML = `
+      <div class="card pad">
+        <div class="row wrap"><h1 style="flex:1;min-width:220px">${esc(data.job_name)}</h1>
+          ${items.length > 1 ? `<span class="badge ${approved === items.length ? 'ok' : ''}" style="font-size:13px;padding:4px 10px">${approved} of ${items.length} approved</span>` : ''}</div>
+        <p class="muted" style="margin:8px 0 0">${pending
+          ? (items.length > 1 ? 'Review each item below. You can approve some and request changes on others.' : 'Please review your proof below, then approve it or request changes.')
+          : approved === items.length ? "Everything is approved — thank you! We'll take it from here." : "Thanks! We're working on your changes and will email you when the next proof is ready."}
+          ${pending ? 'Check spelling, colors, sizes and placement carefully. We print exactly what you approve.' : ''}</p>
+        ${items.length > 1 ? `<div class="jump">${items.map((it) => `<a href="#item-${it.id}">${esc(it.label)} ${stateBadge(stateOf(it))}</a>`).join('')}</div>` : ''}
+        ${data.rep ? `<div class="small muted" style="margin-top:12px">Questions? Contact ${esc(data.rep.name || '')} at <a href="mailto:${esc(data.rep.email)}">${esc(data.rep.email)}</a>.</div>` : ''}
+      </div>
+      ${items.map(itemHtml).join('')}`;
+    items.forEach((it) => { if (it.versions.length) wireItem(it); });
+  }
+
+  function currentVersion(it) {
+    return it.versions.find((v) => v.id === selected[it.id]) || it.versions[0];
+  }
+
+  function itemHtml(it) {
+    const v = currentVersion(it);
+    const head = `<div class="item-head">${it.image_url ? `<img src="${esc(it.image_url)}" alt="">` : ''}<div style="flex:1;min-width:0">
+        <div class="row wrap"><h2 style="font-size:18px">${esc(it.label)}</h2>${stateBadge(stateOf(it))}</div>
+        <div class="small muted">${(it.garments || []).length
+          ? [it, ...it.garments].map((g) => `${[g.brand, g.style].filter(Boolean).join(' ') || g.product_type} — ${g.color_name}`).map(esc).join('<br>')
+          : esc(it.color_name)}</div>
+        <div class="small muted">${[it.decoration_type, (it.locations || []).join(', '), it.print_colors ? `Ink: ${it.print_colors}` : ''].filter(Boolean).map(esc).join(' · ')}</div></div></div>`;
+    if (!v) {
+      return `<section class="item" id="item-${it.id}" style="grid-template-columns:1fr"><div class="card pad">${head}<div class="muted">This proof isn't ready yet — we'll email you when it is.</div></div></section>`;
+    }
+    return `<section class="item" id="item-${it.id}">
+      <div>
+        ${head}
+        ${it.versions.length > 1 ? `<div class="vtabs">${it.versions.map((x) => `<button class="btn-sm ${x.id === v.id ? 'on' : ''}" data-v="${x.id}">Version ${x.version}${x.id === it.versions[0].id ? ' (current)' : ''}</button>`).join('')}</div>` : ''}
+        <div class="viewer" data-viewer><div class="empty"><span class="spin"></span> Loading proof…</div></div>
+        <div style="margin-top:8px"><a class="small" href="${esc(v.file.url)}?download=1${data.preview ? '&preview=1' : ''}">Download ${esc(v.file.name || 'proof')}</a></div>
+      </div>
+      <div class="panel"><div class="card pad" data-action></div></div>
+    </section>`;
+  }
+
+  function wireItem(it) {
+    const sec = document.getElementById(`item-${it.id}`);
+    sec.querySelectorAll('[data-v]').forEach((b) => (b.onclick = () => {
+      selected[it.id] = +b.dataset.v;
+      sec.outerHTML = itemHtml(it);
+      wireItem(it);
+    }));
+    const v = currentVersion(it);
+    renderAction(it, v, sec.querySelector('[data-action]'));
+    renderFile(v, sec.querySelector('[data-viewer]'));
+  }
+
+  function renderAction(it, v, box) {
+    const isLatest = v.id === it.versions[0].id;
+    const resp = v.response;
+    if (resp) {
+      box.innerHTML = resp.action === 'approved'
+        ? `<div class="callout ok"><strong>✓ Approved</strong> by ${esc(resp.signer_name)}\n${fmt(resp.created_at)}</div>`
+        : `<div class="callout bad"><strong>Changes requested</strong> by ${esc(resp.signer_name)} · ${fmt(resp.created_at)}\n${linkify(resp.comment || '')}</div><p class="small muted" style="margin-bottom:0">${isLatest ? "Got it — we're working on a revised proof and will email you when it's ready." : ''}</p>`;
+      return;
+    }
+    if (!isLatest) { box.innerHTML = `<div class="callout info">This is an older version. Switch to the current version to approve.</div>`; return; }
+    const warns = v.warnings || [];
+    box.innerHTML = `
+      <h2 style="margin-bottom:6px">Review ${esc(it.label)}</h2>
+      ${v.note ? `<div class="callout info" style="margin-bottom:10px">${linkify(v.note)}</div>` : ''}
+      ${warns.length ? `<div style="margin-bottom:12px"><div class="label">Please confirm you've read these notes:</div>${warns.map((w) => `<label class="ack"><input type="checkbox" value="${esc(w.key)}">${esc(w.text)}</label>`).join('')}</div>` : ''}
+      <label class="field"><span class="req">Your name</span><input type="text" class="f-name" autocomplete="name" value="${esc(signer)}"></label>
+      <div class="changes-box hidden" style="margin-top:10px"><label class="field"><span class="req">What would you like changed?</span><textarea class="f-comment" rows="4" placeholder="Be as specific as you can — e.g. make the logo 20% bigger, change the text to…"></textarea></label></div>
+      <div class="err f-err" style="margin:8px 0"></div>
+      <div class="stack">
+        <button class="btn-primary big f-approve">Approve ${esc(it.label)}</button>
+        <button class="big f-changes">Request changes</button>
+      </div>`;
+    const $ = (s) => box.querySelector(s);
+    const err = (m) => ($('.f-err').textContent = m);
+    const acks = () => [...box.querySelectorAll('.ack input:checked')].map((i) => i.value);
+    const syncApprove = () => { $('.f-approve').disabled = acks().length < warns.length; };
+    box.querySelectorAll('.ack input').forEach((i) => (i.onchange = syncApprove));
+    syncApprove();
+    $('.f-name').oninput = (e) => { signer = e.target.value; document.querySelectorAll('.f-name').forEach((x) => { if (x !== e.target) x.value = signer; }); };
+    $('.f-changes').onclick = () => {
+      if ($('.changes-box').classList.contains('hidden')) {
+        $('.changes-box').classList.remove('hidden');
+        $('.f-approve').classList.add('hidden');
+        $('.f-changes').textContent = 'Send change request';
+        $('.f-changes').classList.add('btn-orange');
+        $('.f-comment').focus();
+        $('.f-changes').insertAdjacentHTML('afterend', '<button class="btn-ghost f-cancel">Cancel</button>');
+        $('.f-cancel').onclick = () => renderAction(it, v, box);
+        return;
+      }
+      submit('changes');
+    };
+    $('.f-approve').onclick = () => submit('approved');
+
+    async function submit(action) {
+      err('');
+      const name = $('.f-name').value.trim();
+      const comment = $('.f-comment').value || '';
+      if (!name) return err('Please enter your name.');
+      if (action === 'changes' && !comment.trim()) return err('Tell us what you would like changed.');
+      if (action === 'approved' && acks().length < warns.length) return err('Please check off each note first.');
+      if (data.preview) return err('Preview mode — responses are disabled for staff.');
+      const btn = action === 'approved' ? $('.f-approve') : $('.f-changes');
+      btn.disabled = true;
+      try {
+        const res = await fetch(`/api/public/${token}/respond`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ versionId: v.id, action, name, comment, acknowledged: acks() }),
+        });
+        const out = await res.json();
+        if (!res.ok) throw new Error(out.error || 'Something went wrong');
+        signer = name;
+        const y = window.scrollY;
+        await load();
+        window.scrollTo(0, y);
+      } catch (e) { err(e.message); btn.disabled = false; }
+    }
+  }
+
+  const pdfCache = {};
+  async function renderFile(v, viewer) {
+    const url = `${v.file.url}${data.preview ? '?preview=1' : ''}`;
+    const mime = v.file.mime || '';
+    if (mime.startsWith('image/') && !/tiff|photoshop/.test(mime)) {
+      viewer.innerHTML = `<img src="${esc(url)}" alt="Proof">`;
+      return;
+    }
+    if (mime === 'application/pdf' && window.pdfjsLib) {
+      try {
+        pdfCache[url] = pdfCache[url] || pdfjsLib.getDocument({ url, withCredentials: true }).promise;
+        const pdf = await pdfCache[url];
+        viewer.innerHTML = '';
+        const width = viewer.clientWidth - 28;
+        for (let p = 1; p <= pdf.numPages; p++) {
+          const page = await pdf.getPage(p);
+          const base = page.getViewport({ scale: 1 });
+          const scale = (width / base.width) * Math.min(window.devicePixelRatio || 1, 2.5);
+          const vp = page.getViewport({ scale });
+          const canvas = document.createElement('canvas');
+          canvas.width = vp.width; canvas.height = vp.height;
+          viewer.appendChild(canvas);
+          await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+        }
+        return;
+      } catch (e) {
+        console.error(e);
+      }
+    }
+    viewer.innerHTML = mime === 'application/pdf'
+      ? `<iframe src="${esc(url)}" style="width:100%;height:80vh;border:0"></iframe>`
+      : `<div class="empty">This proof can't be previewed in the browser.<br><a class="btn" style="margin-top:10px" href="${esc(url)}${url.includes('?') ? '&' : '?'}download=1">Download ${esc(v.file.name)}</a></div>`;
+  }
+
+  load();
+})();
+</script>
+</body></html>

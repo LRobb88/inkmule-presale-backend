@@ -1,0 +1,193 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Inter:wght@400;500;600;700&display=swap"><link rel="stylesheet" href="/css/app.css">
+<title>Art Requests</title>
+<script src="https://integrations.missiveapp.com/missive.js"></script>
+<style>
+  .sb-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: #fff; z-index: 10; }
+  .sb-head .wm { font-family: 'DM Serif Display', Georgia, serif; color: var(--teal); font-size: 18px; }
+  .convo { font-size: 12px; color: var(--muted); padding: 10px 12px 0; }
+  .mini { border: 1px solid var(--line); border-radius: 8px; padding: 10px; cursor: pointer; display: block; background: #fff; }
+  .mini:hover { border-color: var(--teal); }
+  .mini + .mini { margin-top: 8px; }
+  .devbar { background: var(--warn-tint); padding: 8px 12px; font-size: 12px; display: flex; gap: 6px; align-items: center; }
+</style></head>
+<body class="compact">
+<div id="devbar" class="devbar hidden">Not in Missive — test conversation ID: <input type="text" id="devConvo" value="test-convo-1" style="width:140px;padding:3px 6px"><button class="btn-sm" id="devGo">Load</button></div>
+<div class="sb-head"><span class="wm">inkmule</span><span class="small muted">Art requests</span><div class="spacer"></div><button class="btn-ghost btn-sm hidden" id="backBtn">← Back</button></div>
+<div id="app" class="page"><div class="empty"><span class="spin"></span></div></div>
+
+<script src="/js/core.js"></script><script src="/js/form.js"></script><script src="/js/detail.js"></script>
+<script>
+(async function () {
+  const { esc, h } = IM;
+  const inMissive = typeof window.Missive !== 'undefined' && window.parent !== window;
+  const app = document.getElementById('app');
+  const backBtn = document.getElementById('backBtn');
+  let convo = null;          // { id, subject, emails: [{address, name}] }
+  let screen = 'home';
+  let back = null;
+
+  const store = {
+    async get(k) { if (inMissive) return Missive.storeGet(k); try { return localStorage.getItem(k); } catch { return null; } },
+    async set(k, v) { if (inMissive) return Missive.storeSet(k, v); try { localStorage.setItem(k, v); } catch {} },
+  };
+  const openUrl = (u) => (inMissive ? Missive.openURL(u) : window.open(u, '_blank', 'noopener'));
+
+  function setBack(fn) { back = fn; backBtn.classList.toggle('hidden', !fn); }
+  backBtn.onclick = () => back && back();
+
+  // ---------- Auth ----------
+  IM.onUnauthorized = () => { store.set('im_token', ''); local.set(null); IM.token = null; showSignIn(); };
+
+  const local = {
+    get() { try { return localStorage.getItem('im_token'); } catch { return null; } },
+    set(v) { try { v ? localStorage.setItem('im_token', v) : localStorage.removeItem('im_token'); } catch {} },
+  };
+  async function ensureAuth() {
+    let fromMissive = null;
+    try { fromMissive = await store.get('im_token'); } catch {}
+    for (const saved of [fromMissive, local.get()]) {
+      if (!saved) continue;
+      IM.token = saved;
+      const { user } = await IM.api('/api/me');
+      if (user) {
+        IM.user = user;
+        if (saved !== fromMissive) { try { await store.set('im_token', saved); } catch {} }
+        local.set(saved);
+        return true;
+      }
+      IM.token = null;
+    }
+    const { user } = await IM.api('/api/me'); // cookie (works in a normal browser tab)
+    if (user) { IM.user = user; return true; }
+    return false;
+  }
+
+  function showSignIn() {
+    setBack(null);
+    app.innerHTML = `<div class="stack" style="text-align:center;padding-top:20px">
+      <div>Sign in once with your Inkmule Google account to use art requests in Missive.</div>
+      <button class="btn-primary" id="signin" style="justify-content:center">Sign in with Google</button>
+      <div class="small muted hidden" id="waiting"><span class="spin"></span> Finish signing in in your browser…</div></div>`;
+    document.getElementById('signin').onclick = () => {
+      const nonce = Array.from(crypto.getRandomValues(new Uint8Array(24)), (b) => b.toString(16).padStart(2, '0')).join('');
+      openUrl(`${location.origin}/login?handoff=${nonce}`);
+      document.getElementById('waiting').classList.remove('hidden');
+      const started = Date.now();
+      const poll = setInterval(async () => {
+        if (Date.now() - started > 10 * 60e3) { clearInterval(poll); return; }
+        try {
+          const { token } = await fetch(`/auth/handoff/${nonce}`).then((r) => r.json());
+          if (token) { clearInterval(poll); IM.token = token; try { await store.set('im_token', token); } catch {} local.set(token); await ensureAuth(); app.innerHTML = ''; if (convo) renderHome(); else if (inMissive) renderHome(); else loadConversation([document.getElementById('devConvo').value]); }
+        } catch {}
+      }, 2000);
+    };
+  }
+
+  // ---------- Conversation context ----------
+  async function loadConversation(ids) {
+    if (!ids || ids.length !== 1) { convo = null; return renderHome(); }
+    if (!inMissive) { convo = { id: ids[0], subject: 'Test conversation', emails: [{ address: 'client@example.com', name: 'Test Client' }] }; return renderHome(); }
+    const [c] = await Missive.fetchConversations(ids);
+    const emails = (Missive.getEmailAddresses ? Missive.getEmailAddresses([c]) : []) || [];
+    convo = { id: c.id, subject: c.subject || (c.latest_message && c.latest_message.subject) || '', emails };
+    renderHome();
+  }
+  const clientGuess = () => {
+    const domain = '@' + ((IM.user && IM.user.email.split('@')[1]) || 'inkmule.com');
+    return (convo && convo.emails || []).find((e) => e.address && !e.address.toLowerCase().endsWith(domain)) || null;
+  };
+
+  // ---------- Screens ----------
+  async function renderHome() {
+    if (!IM.user) return;
+    screen = 'home';
+    setBack(null);
+    if (!convo) {
+      app.innerHTML = `<div class="empty">Open a conversation to see or create its art requests.</div><div id="mine"></div>`;
+      return renderMine(document.getElementById('mine'));
+    }
+    app.innerHTML = `<div class="stack">
+      <div class="small muted">${esc(convo.subject || 'This conversation')}</div>
+      <div id="linked"><span class="spin"></span></div>
+      <button class="btn-primary" id="newReq" style="width:100%;justify-content:center">+ New art request</button>
+      <div id="related"></div></div>`;
+    document.getElementById('newReq').onclick = renderNew;
+    const current = convo.id;
+    const { requests } = await IM.api(`/api/requests?conversation=${encodeURIComponent(convo.id)}`);
+    if (screen !== 'home' || !convo || convo.id !== current) return;
+    const linked = document.getElementById('linked');
+    linked.innerHTML = requests.length
+      ? `<h3 style="margin-bottom:6px">Linked to this conversation</h3>${requests.map(miniCard).join('')}`
+      : '<div class="muted small">No art requests linked to this conversation yet.</div>';
+    wireMini(linked);
+    const client = clientGuess();
+    if (client) {
+      const rel = (await IM.api(`/api/requests?q=${encodeURIComponent(client.address)}`)).requests.filter((r) => r.missive_conversation_id !== convo.id);
+      if (rel.length && screen === 'home') {
+        const box = document.getElementById('related');
+        box.innerHTML = `<h3 style="margin:6px 0">Other requests for ${esc(client.address)}</h3>${rel.slice(0, 6).map((r) => miniCard(r, true)).join('')}`;
+        wireMini(box);
+      }
+    }
+  }
+
+  async function renderMine(el) {
+    const [{ requests }] = await Promise.all([IM.api('/api/requests'), IM.meta()]);
+    const mine = requests.filter((r) => (r.rep_id === IM.user.id || r.artist_id === IM.user.id) && !IM.archiveCols.includes(r.status));
+    el.innerHTML = mine.length ? `<h3 style="margin:6px 0">Your open requests</h3>${mine.slice(0, 20).map(miniCard).join('')}` : '';
+    wireMini(el);
+  }
+
+  function miniCard(r, linkable) {
+    return `<div class="mini" data-id="${r.id}">
+      <div class="row"><strong style="flex:1;min-width:0">${esc(r.job_name)}${r.kind === 'design' ? ' <span class="badge teal">Design</span>' : ''}</strong>${IM.statusBadge(r.status, r.status_label)}</div>
+      <div class="small muted">${esc(r.products || '')}</div>
+      <div class="row wrap" style="margin-top:6px">${IM.dueBadge(r.due_date, r.status)} ${IM.proofHint(r)}
+        ${linkable ? `<span class="spacer"></span><button class="btn-sm" data-link="${r.id}">Link here</button>` : ''}</div></div>`;
+  }
+  function wireMini(el) {
+    el.querySelectorAll('.mini').forEach((m) => (m.onclick = (e) => { if (!e.target.dataset.link) renderDetail(+m.dataset.id); }));
+    el.querySelectorAll('[data-link]').forEach((b) => (b.onclick = async (e) => {
+      e.stopPropagation();
+      try { await IM.api(`/api/requests/${b.dataset.link}`, { method: 'PATCH', body: { missive_conversation_id: convo.id } }); IM.toast('Linked to this conversation'); renderHome(); }
+      catch (x) { IM.toast(x.message, true); }
+    }));
+  }
+
+  async function renderNew() {
+    screen = 'new';
+    setBack(renderHome);
+    app.innerHTML = '';
+    const client = clientGuess();
+    await IM.RequestForm(app, {
+      compact: true,
+      prefill: {
+        client_email: client ? client.address : '',
+        client_name: client && client.name && client.name !== client.address ? client.name : '',
+        missive_conversation_id: convo ? convo.id : null,
+        missive_subject: convo ? convo.subject : null,
+      },
+      onCreated: (r) => renderDetail(r.id),
+    });
+  }
+
+  async function renderDetail(id) {
+    screen = 'detail';
+    setBack(renderHome);
+    app.innerHTML = '<div class="empty"><span class="spin"></span></div>';
+    try { await IM.RequestDetail(app, id, { compact: true, openExternal: openUrl }); }
+    catch (e) { app.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+  }
+
+  // ---------- Boot ----------
+  if (!(await ensureAuth())) showSignIn(); else app.innerHTML = '';
+  if (inMissive) {
+    Missive.on('change:conversations', (ids) => { if (screen === 'home' || !convo || !ids || ids[0] !== convo.id) loadConversation(ids); }, { retroactive: true });
+  } else {
+    document.getElementById('devbar').classList.remove('hidden');
+    document.getElementById('devGo').onclick = () => loadConversation([document.getElementById('devConvo').value]);
+    if (IM.user) loadConversation([document.getElementById('devConvo').value]);
+  }
+})();
+</script>
+</body></html>

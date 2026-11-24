@@ -1,0 +1,79 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Inter:wght@400;500;600;700&display=swap"><link rel="stylesheet" href="/css/app.css"><link rel="icon" href="/img/icon.svg"><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/img/icon-192.png"><meta name="theme-color" content="#005D63">
+<title>Sign in · Inkmule Proofs</title>
+<style>
+  body { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: var(--teal); }
+  .box { background: #fff; border-radius: 14px; padding: 34px 30px; width: 100%; max-width: 380px; text-align: center; box-shadow: 0 20px 60px rgba(0,0,0,.25); }
+  .wm { font-family: 'DM Serif Display', Georgia, serif; font-size: 34px; color: var(--teal); }
+  #gbtn { display: flex; justify-content: center; margin: 22px 0 8px; min-height: 44px; }
+</style></head>
+<body>
+  <div class="box">
+    <div class="wm">inkmule</div>
+    <div class="muted">Art requests &amp; proofs</div>
+    <div id="signed" class="hidden"><div class="callout ok" style="margin-top:22px">You're signed in.<span id="back"></span></div></div>
+    <div id="signin">
+      <div id="gbtn"></div>
+      <div id="dev" class="hidden stack" style="margin-top:18px;text-align:left">
+        <div class="small muted">Local testing sign-in (DEV_AUTH)</div>
+        <input type="email" id="devEmail" placeholder="you@inkmule.com"><button class="btn-primary" id="devGo" style="width:100%;justify-content:center">Sign in</button>
+      </div>
+      <div class="err" id="err"></div>
+      <div class="small muted" id="note" style="margin-top:10px"></div>
+    </div>
+  </div>
+<script src="/js/core.js"></script>
+<script>
+(async function () {
+  const params = new URLSearchParams(location.search);
+  const handoff = params.get('handoff');
+  const next = params.get('next') || '/board';
+  const cfg = await fetch('/auth/config').then((r) => r.json());
+  document.getElementById('note').textContent = `Use your @${cfg.domain} Google account.`;
+
+  const framed = window.top !== window;
+  function done(token) {
+    if (framed && !handoff) {
+      try { localStorage.setItem('im_token', token); } catch {}
+      location.href = '/missive';
+      return;
+    }
+    if (handoff) {
+      document.getElementById('signin').classList.add('hidden');
+      document.getElementById('signed').classList.remove('hidden');
+      document.getElementById('back').textContent = ' Head back to Missive — the sidebar will pick it up in a few seconds. You can close this tab.';
+    } else location.href = next.startsWith('/') ? next : '/board';
+  }
+  async function post(url, body) {
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.assign(body, { handoff })) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Sign-in failed');
+    return data;
+  }
+  const err = (m) => (document.getElementById('err').textContent = m);
+
+  // Already signed in (cookie) and this is a Missive handoff → re-issue for the sidebar via Google again isn't needed;
+  // but the sidebar needs a token, so we still ask for one click.
+  if (cfg.googleClientId) {
+    const s = document.createElement('script');
+    s.src = 'https://accounts.google.com/gsi/client';
+    s.onload = () => {
+      google.accounts.id.initialize({
+        client_id: cfg.googleClientId,
+        hd: cfg.domain,
+        callback: async (resp) => { try { const d = await post('/auth/google', { credential: resp.credential }); done(d.token); } catch (e) { err(e.message); } },
+      });
+      google.accounts.id.renderButton(document.getElementById('gbtn'), { theme: 'filled_blue', size: 'large', text: 'signin_with', shape: 'pill' });
+    };
+    document.head.appendChild(s);
+  } else if (!cfg.devAuth) {
+    err('Google sign-in is not configured yet (GOOGLE_CLIENT_ID).');
+  }
+  if (cfg.devAuth) {
+    document.getElementById('dev').classList.remove('hidden');
+    document.getElementById('devGo').onclick = async () => {
+      try { const d = await post('/auth/dev', { email: document.getElementById('devEmail').value }); done(d.token); } catch (e) { err(e.message); }
+    };
+  }
+})();
+</script>
+</body></html>

@@ -1,0 +1,221 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Inter:wght@400;500;600;700&display=swap"><link rel="stylesheet" href="/css/app.css"><link rel="icon" href="/img/icon.svg"><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/img/icon-192.png"><meta name="theme-color" content="#005D63">
+<title>Settings · Inkmule Proofs</title>
+<style>
+  .colrow { display: grid; grid-template-columns: 34px 1fr auto auto auto auto; gap: 8px; align-items: center; }
+  .colrow input[type=color] { width: 34px; height: 34px; padding: 2px; border: 1px solid var(--line); border-radius: 7px; background: #fff; }
+  .automap { display: grid; grid-template-columns: 1fr 220px; gap: 8px 12px; align-items: center; }
+  @media (max-width: 640px) { .automap { grid-template-columns: 1fr; } .colrow { grid-template-columns: 34px 1fr auto auto; } .colrow .arch { grid-column: 2 / -1; } }
+</style></head>
+<body>
+<main class="page" style="max-width:820px">
+  <h1 style="margin-bottom:14px">Settings</h1>
+
+  <div class="card pad stack" id="notif">
+    <div><h2>Notifications on this computer</h2>
+      <div class="muted small">Get Mac notifications for the things you pick below — even when this tab is closed. Turn them on in each browser you use.</div></div>
+    <div class="row wrap"><span id="pushState" class="badge">Checking…</span><div class="spacer"></div>
+      <button class="btn-primary hidden" id="pushOn">Turn on notifications</button>
+      <button class="hidden" id="pushTest">Send a test</button>
+      <button class="btn-ghost hidden" id="pushOff">Turn off on this computer</button></div>
+    <div id="pushHelp" class="callout info hidden"></div>
+    <div><span class="label">Notify me when…</span><div id="prefs" class="stack" style="margin-top:6px"></div></div>
+  </div>
+
+  <div class="card pad stack" style="margin-top:16px">
+    <div><h2>Board columns</h2>
+      <div class="muted small">Rename, reorder, recolor, add or remove columns. Cards in a removed column move to the first column. "Archive" columns only show the last 14 days on the board (everything is still in List view).</div></div>
+    <div id="columns" class="stack"></div>
+    <div><button id="addCol">+ Add column</button></div>
+    <div style="margin-top:6px"><span class="label">Move cards automatically when…</span>
+      <div id="automap" class="automap" style="margin-top:6px"></div></div>
+    <div class="row"><div class="spacer"></div><button class="btn-primary" id="saveCols">Save columns</button></div>
+  </div>
+
+  <div class="card pad stack" style="margin-top:16px">
+    <div><h2>Proof warnings</h2><div class="muted small">The checkboxes artists can tick when they add a proof. Clients must check off each ticked warning before approving. Changes apply to new proofs; already-sent proofs keep their wording.</div></div>
+    <div id="warnings" class="stack"></div>
+    <div class="row"><button id="add">+ Add warning</button><div class="spacer"></div><button class="btn-primary" id="save">Save warnings</button></div>
+  </div>
+
+  <div class="card pad stack" style="margin-top:16px">
+    <h2>Integrations</h2>
+    <div id="integrations" class="kv"></div>
+    <div class="row"><button id="ssRefresh">Refresh S&amp;S catalog now</button><span class="small muted" id="ssMsg"></span></div>
+  </div>
+  <div class="card pad stack" style="margin-top:16px">
+    <h2>Missive sidebar</h2>
+    <div class="small">In Missive: <strong>Settings → Integrations → Add integration → iFrame</strong>, name it "Art Requests", and use this URL:</div>
+    <div class="row"><input type="text" readonly id="missiveUrl"><button id="copyMissive">Copy</button></div>
+  </div>
+</main>
+<script src="/js/core.js"></script>
+<script>
+(async function () {
+  const { esc } = IM;
+  await IM.topbar('settings');
+  const meta = await IM.meta(true);
+
+  // ---------- Notifications ----------
+  const st = document.getElementById('pushState'), on = document.getElementById('pushOn'), off = document.getElementById('pushOff'),
+    test = document.getElementById('pushTest'), help = document.getElementById('pushHelp');
+  const pcfg = await IM.api('/api/push/config');
+  let prefs = pcfg.prefs;
+  document.getElementById('prefs').innerHTML = pcfg.events.map((e) => `<label class="row" style="gap:8px;cursor:pointer"><input type="checkbox" data-pref="${e.key}" ${prefs[e.key] ? 'checked' : ''}><span>${esc(e.label)}</span></label>`).join('');
+  document.querySelectorAll('[data-pref]').forEach((c) => (c.onchange = async () => {
+    prefs[c.dataset.pref] = c.checked;
+    try { prefs = (await IM.api('/api/push/prefs', { method: 'PUT', body: { prefs } })).prefs; IM.toast('Saved'); } catch (x) { IM.toast(x.message, true); }
+  }));
+  const supported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  const b64ToBytes = (b64) => { const p = '='.repeat((4 - (b64.length % 4)) % 4); const s = atob((b64 + p).replace(/-/g, '+').replace(/_/g, '/')); return Uint8Array.from([...s].map((c) => c.charCodeAt(0))); };
+  async function currentSub() {
+    const reg = await navigator.serviceWorker.register('/sw.js');
+    await navigator.serviceWorker.ready;
+    return { reg, sub: await reg.pushManager.getSubscription() };
+  }
+  async function refreshPush() {
+    [on, off, test].forEach((b) => b.classList.add('hidden'));
+    help.classList.add('hidden');
+    if (!supported) {
+      st.className = 'badge warn'; st.textContent = 'Not supported in this browser';
+      help.textContent = 'Use Chrome, or Safari on macOS 13+. In Safari you can also choose File → Add to Dock to get Inkmule Proofs as its own app with notifications.';
+      help.classList.remove('hidden');
+      return;
+    }
+    if (Notification.permission === 'denied') {
+      st.className = 'badge bad'; st.textContent = 'Blocked';
+      help.textContent = 'Notifications are blocked for this site. In Chrome: click the icon left of the address bar → Notifications → Allow. In Safari: Settings → Websites → Notifications. Also check macOS System Settings → Notifications → your browser.';
+      help.classList.remove('hidden');
+      return;
+    }
+    const { sub } = await currentSub();
+    if (sub && Notification.permission === 'granted') {
+      st.className = 'badge ok'; st.textContent = 'On for this computer';
+      test.classList.remove('hidden'); off.classList.remove('hidden');
+    } else {
+      st.className = 'badge'; st.textContent = 'Off';
+      on.classList.remove('hidden');
+    }
+  }
+  on.onclick = async () => {
+    try {
+      await IM.busy(on, async () => {
+        const perm = await Notification.requestPermission();
+        if (perm !== 'granted') throw new Error('Notifications weren’t allowed.');
+        const { reg } = await currentSub();
+        const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(pcfg.publicKey) });
+        await IM.api('/api/push/subscribe', { body: { subscription: sub.toJSON() } });
+      });
+      IM.toast('Notifications on');
+    } catch (x) { IM.toast(x.message, true); }
+    refreshPush();
+  };
+  off.onclick = async () => {
+    const { sub } = await currentSub();
+    if (sub) { await IM.api('/api/push/unsubscribe', { body: { endpoint: sub.endpoint } }).catch(() => {}); await sub.unsubscribe(); }
+    IM.toast('Notifications off for this computer');
+    refreshPush();
+  };
+  test.onclick = async () => {
+    try { await IM.busy(test, () => IM.api('/api/push/test', { method: 'POST' })); IM.toast('Test sent — it should pop up in a few seconds'); }
+    catch (x) { IM.toast(x.message, true); }
+  };
+  refreshPush().catch((e) => { st.textContent = 'Error'; console.error(e); });
+
+  // ---------- Board columns ----------
+  let columns = meta.statuses.map((c) => ({ ...c }));
+  let automation = { ...meta.automation };
+  const colBox = document.getElementById('columns'), autoBox = document.getElementById('automap');
+  function renderCols() {
+    colBox.innerHTML = columns.map((c, i) => `<div class="colrow" data-i="${i}">
+      <input type="color" value="${esc(c.color || '#8a8f90')}" data-f="color" title="Color">
+      <input type="text" value="${esc(c.label)}" data-f="label" placeholder="Column name">
+      <button class="btn-sm" data-a="up" ${i === 0 ? 'disabled' : ''} title="Move left">↑</button>
+      <button class="btn-sm" data-a="down" ${i === columns.length - 1 ? 'disabled' : ''} title="Move right">↓</button>
+      <label class="row small arch" style="gap:4px;cursor:pointer"><input type="checkbox" data-f="archive" ${c.archive ? 'checked' : ''}>Archive</label>
+      <button class="btn-sm btn-danger" data-a="del" ${columns.length === 1 ? 'disabled' : ''} title="Remove">✕</button></div>`).join('');
+    colBox.querySelectorAll('[data-i]').forEach((row) => {
+      const i = +row.dataset.i;
+      row.querySelector('[data-f=label]').oninput = (e) => { columns[i].label = e.target.value; renderAuto(); };
+      row.querySelector('[data-f=color]').oninput = (e) => (columns[i].color = e.target.value);
+      row.querySelector('[data-f=archive]').onchange = (e) => (columns[i].archive = e.target.checked);
+      row.querySelectorAll('[data-a]').forEach((b) => (b.onclick = () => {
+        if (b.dataset.a === 'del') {
+          const gone = columns[i].key;
+          columns.splice(i, 1);
+          Object.keys(automation).forEach((k) => { if (automation[k] === gone) automation[k] = ''; });
+        }
+        if (b.dataset.a === 'up') [columns[i - 1], columns[i]] = [columns[i], columns[i - 1]];
+        if (b.dataset.a === 'down') [columns[i + 1], columns[i]] = [columns[i], columns[i + 1]];
+        renderCols();
+      }));
+    });
+    renderAuto();
+  }
+  function renderAuto() {
+    autoBox.innerHTML = meta.automationEvents.map((e) => `<div class="small">${esc(e.label)}</div>
+      <select data-ev="${e.key}">${e.key === 'created' ? '' : `<option value="">Don't move the card</option>`}${columns.map((c, i) => `<option value="${esc(c.key || `__new${i}`)}" ${automation[e.key] && automation[e.key] === c.key ? 'selected' : ''}>→ ${esc(c.label || 'Untitled')}</option>`).join('')}</select>`).join('');
+    autoBox.querySelectorAll('[data-ev]').forEach((s) => (s.onchange = () => (automation[s.dataset.ev] = s.value)));
+  }
+  document.getElementById('addCol').onclick = () => {
+    const key = 'col_' + Date.now().toString(36);
+    columns.push({ key, label: '', color: '#2f7fd1', archive: false });
+    renderCols();
+    colBox.querySelector('[data-i]:last-child [data-f=label]').focus();
+  };
+  document.getElementById('saveCols').onclick = async (e) => {
+    try {
+      const out = await IM.busy(e.currentTarget, () => IM.api('/api/settings/columns', { method: 'PUT', body: { columns, automation } }));
+      columns = out.columns; automation = out.automation;
+      await IM.meta(true);
+      renderCols();
+      IM.toast('Columns saved');
+    } catch (x) { IM.toast(x.message, true); }
+  };
+  renderCols();
+
+  // ---------- Warnings ----------
+  let warnings = meta.warnings.map((w) => ({ ...w }));
+  const box = document.getElementById('warnings');
+  function render() {
+    box.innerHTML = warnings.map((w, i) => `<div class="row" data-i="${i}">
+      <input type="text" value="${esc(w.text)}" data-f="text">
+      <button class="btn-sm" data-a="up" ${i === 0 ? 'disabled' : ''} title="Move up">↑</button>
+      <button class="btn-sm" data-a="down" ${i === warnings.length - 1 ? 'disabled' : ''} title="Move down">↓</button>
+      <button class="btn-sm btn-danger" data-a="del" title="Remove">✕</button></div>`).join('') || '<div class="muted">No warnings yet.</div>';
+    box.querySelectorAll('[data-i]').forEach((row) => {
+      const i = +row.dataset.i;
+      row.querySelector('input').oninput = (e) => (warnings[i].text = e.target.value);
+      row.querySelectorAll('[data-a]').forEach((b) => (b.onclick = () => {
+        if (b.dataset.a === 'del') warnings.splice(i, 1);
+        if (b.dataset.a === 'up') [warnings[i - 1], warnings[i]] = [warnings[i], warnings[i - 1]];
+        if (b.dataset.a === 'down') [warnings[i + 1], warnings[i]] = [warnings[i], warnings[i + 1]];
+        render();
+      }));
+    });
+  }
+  render();
+  document.getElementById('add').onclick = () => { warnings.push({ key: 'w' + Date.now().toString(36), text: '' }); render(); box.querySelector('[data-i]:last-child input').focus(); };
+  document.getElementById('save').onclick = async (e) => {
+    try { warnings = (await IM.busy(e.currentTarget, () => IM.api('/api/settings/warnings', { method: 'PUT', body: { warnings } }))).warnings; render(); IM.toast('Warnings saved'); }
+    catch (x) { IM.toast(x.message, true); }
+  };
+
+  // ---------- Integrations ----------
+  const okb = (v, label) => `<span class="badge ${v ? 'ok' : 'warn'}">${v ? 'Connected' : label || 'Not set up'}</span>`;
+  const i = meta.integrations;
+  document.getElementById('integrations').innerHTML = `
+    <dt>Dropbox</dt><dd>${okb(i.dropbox, 'Not set up — files saved on the server')}</dd>
+    <dt>S&amp;S</dt><dd>${okb(i.ss)}</dd>
+    <dt>Email</dt><dd>${okb(i.email, 'Not set up — emails not sent')}</dd>
+    <dt>Missive</dt><dd>${okb(i.missive, 'No API token — conversation notes off')}</dd>`;
+  document.getElementById('ssRefresh').onclick = async (e) => {
+    const msg = document.getElementById('ssMsg');
+    try { const r = await IM.busy(e.currentTarget, () => IM.api('/api/ss/refresh', { method: 'POST' })); msg.textContent = r.count ? `${r.count} styles loaded` : (r.skipped || 'Done'); }
+    catch (x) { msg.textContent = x.message; }
+  };
+  const mu = document.getElementById('missiveUrl');
+  mu.value = location.origin + '/missive';
+  document.getElementById('copyMissive').onclick = async () => { await IM.copy(mu.value); IM.toast('Copied'); };
+})();
+</script>
+</body></html>

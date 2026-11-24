@@ -1,0 +1,144 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Inter:wght@400;500;600;700&display=swap"><link rel="stylesheet" href="/css/app.css"><link rel="icon" href="/img/icon.svg"><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/img/icon-192.png"><meta name="theme-color" content="#005D63">
+<title>Board · Inkmule Proofs</title></head>
+<body>
+<main class="page wide">
+  <div class="board-tools">
+    <h1 style="margin-right:8px">Art board</h1>
+    <div class="seg" id="viewSeg"><button data-view="kanban">Board</button><button data-view="list">List</button></div>
+    <input type="search" id="q" placeholder="Search job, client, email…">
+    <div class="seg" id="whoSeg"><button data-who="all">Everyone</button><button data-who="mine">Mine</button></div>
+    <div class="spacer"></div>
+    <span class="small muted" id="updated"></span>
+    <a class="btn btn-primary" href="/new">+ New request</a>
+  </div>
+  <div id="view"></div>
+</main>
+<script src="/js/core.js"></script>
+<script>
+(async function () {
+  const { esc } = IM;
+  const me = await IM.topbar('board');
+  const meta = await IM.meta();
+  const store = { get(k, d) { try { return localStorage.getItem(k) || d; } catch { return d; } }, set(k, v) { try { localStorage.setItem(k, v); } catch {} } };
+  let view = store.get('im.view', 'kanban');
+  let who = store.get('im.who', 'all');
+  let sort = { key: 'due_date', dir: 1 };
+  let rows = [];
+  let dragging = null;
+
+  const viewEl = document.getElementById('view');
+  const qEl = document.getElementById('q');
+
+  function setSeg(id, attr, val) { document.querySelectorAll(`#${id} button`).forEach((b) => b.classList.toggle('on', b.dataset[attr] === val)); }
+  document.querySelectorAll('#viewSeg button').forEach((b) => (b.onclick = () => { view = b.dataset.view; store.set('im.view', view); setSeg('viewSeg', 'view', view); render(); }));
+  document.querySelectorAll('#whoSeg button').forEach((b) => (b.onclick = () => { who = b.dataset.who; store.set('im.who', who); setSeg('whoSeg', 'who', who); render(); }));
+  setSeg('viewSeg', 'view', view); setSeg('whoSeg', 'who', who);
+  let qt; qEl.addEventListener('input', () => { clearTimeout(qt); qt = setTimeout(render, 120); });
+
+  function filtered() {
+    const q = qEl.value.trim().toLowerCase();
+    return rows.filter((r) => {
+      if (who === 'mine' && r.rep_id !== me.id && r.artist_id !== me.id) return false;
+      if (!q) return true;
+      return [r.job_name, r.client_name, r.client_company, r.client_email, r.products, r.rep_name, r.artist_name].some((x) => String(x || '').toLowerCase().includes(q));
+    });
+  }
+
+  function cardHtml(r) {
+    return `<a class="kcard" draggable="true" data-id="${r.id}" href="/requests/${r.id}">
+      <div class="top">
+        ${r.thumb ? `<div class="thumb" style="background-image:url('${esc(r.thumb)}')"></div>` : ''}
+        <div style="min-width:0;flex:1"><div class="title">${esc(r.job_name)}</div>
+          <div class="sub">${r.kind === 'design' ? '<span class="badge teal" style="margin-right:4px">Design</span>' : ''}${esc(r.client_company || r.client_name || r.client_email || '')}</div>
+          ${r.products ? `<div class="sub" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(r.products)}${r.decorations ? ' · ' + esc(r.decorations) : ''}</div>` : ''}</div>
+      </div>
+      <div class="meta">${IM.dueBadge(r.due_date, r.status)} ${IM.proofHint(r)}<span class="spacer"></span>
+        ${r.rep_name ? IM.avatar(r.rep_name, r.rep_picture, 'Rep: ' + r.rep_name) : ''}
+        ${r.artist_name ? IM.avatar(r.artist_name, r.artist_picture, 'Artist: ' + r.artist_name) : '<span class="badge" title="No artist yet">Unassigned</span>'}</div>
+    </a>`;
+  }
+
+  function renderKanban() {
+    const list = filtered();
+    viewEl.innerHTML = `<div class="kanban">${meta.statuses.map((s) => {
+      const items = list.filter((r) => r.status === s.key);
+      return `<section class="col" data-status="${s.key}"><div class="col-head"><span class="dot" style="background:${esc(s.color || '#8a8f90')}"></span>${esc(s.label)} <span class="count">${items.length}</span></div>
+        <div class="col-body">${items.map(cardHtml).join('') || ''}</div></section>`;
+    }).join('')}</div>`;
+    wireDnD();
+  }
+
+  function wireDnD() {
+    const marker = IM.h('<div class="drop-marker"></div>');
+    viewEl.querySelectorAll('.kcard').forEach((c) => {
+      c.addEventListener('dragstart', (e) => { dragging = c; c.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', c.dataset.id); });
+      c.addEventListener('dragend', () => { c.classList.remove('dragging'); marker.remove(); viewEl.querySelectorAll('.col').forEach((x) => x.classList.remove('drop')); setTimeout(() => (dragging = null), 50); });
+      c.addEventListener('click', (e) => { if (dragging) e.preventDefault(); });
+    });
+    viewEl.querySelectorAll('.col').forEach((col) => {
+      const body = col.querySelector('.col-body');
+      col.addEventListener('dragover', (e) => {
+        if (!dragging) return;
+        e.preventDefault();
+        viewEl.querySelectorAll('.col').forEach((x) => x.classList.toggle('drop', x === col));
+        const after = [...body.querySelectorAll('.kcard:not(.dragging)')].find((k) => e.clientY < k.getBoundingClientRect().top + k.offsetHeight / 2);
+        if (after) body.insertBefore(marker, after); else body.appendChild(marker);
+      });
+      col.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        if (!dragging) return;
+        const card = dragging;
+        body.insertBefore(card, marker);
+        marker.remove();
+        col.classList.remove('drop');
+        const prev = card.previousElementSibling, next = card.nextElementSibling;
+        const status = col.dataset.status;
+        const row = rows.find((r) => r.id === +card.dataset.id);
+        try {
+          await IM.api(`/api/requests/${card.dataset.id}/move`, { body: {
+            status,
+            beforeId: prev && prev.classList.contains('kcard') ? +prev.dataset.id : null,
+            afterId: next && next.classList.contains('kcard') ? +next.dataset.id : null,
+          } });
+          if (row && row.status !== status) IM.toast(`Moved to ${meta.statuses.find((s) => s.key === status).label}`);
+        } catch (err) { IM.toast(err.message, true); }
+        load();
+      });
+    });
+  }
+
+  function renderList() {
+    const list = filtered().slice();
+    const order = Object.fromEntries(meta.statuses.map((s, i) => [s.key, i]));
+    const val = (r) => (sort.key === 'status' ? order[r.status] : r[sort.key] == null ? '￿' : String(r[sort.key]).toLowerCase());
+    list.sort((a, b) => (val(a) > val(b) ? 1 : val(a) < val(b) ? -1 : 0) * sort.dir);
+    const cols = [['job_name', 'Job'], ['client_email', 'Client'], ['products', 'Products'], ['status', 'Status'], ['status', 'Proof'], ['due_date', 'Due'], ['rep_name', 'Rep'], ['artist_name', 'Artist'], ['updated_at', 'Updated']];
+    viewEl.innerHTML = `<table class="list"><thead><tr>${cols.map(([k, l]) => `<th data-k="${k}">${l}${sort.key === k ? (sort.dir > 0 ? ' ▲' : ' ▼') : ''}</th>`).join('')}</tr></thead>
+      <tbody>${list.map((r) => `<tr data-id="${r.id}">
+        <td><strong>${esc(r.job_name)}</strong></td>
+        <td>${esc(r.client_company || r.client_name || '')}<div class="small muted">${esc(r.client_email)}</div></td>
+        <td class="small">${esc(r.products || '')}</td>
+        <td>${IM.statusBadge(r.status, r.status_label)}</td>
+        <td>${IM.proofHint(r) || '<span class="muted small">—</span>'}</td>
+        <td>${r.due_date ? IM.dueBadge(r.due_date, r.status) : ''}</td>
+        <td class="small">${esc(r.rep_name || '')}</td>
+        <td class="small">${esc(r.artist_name || '—')}</td>
+        <td class="small muted">${IM.ago(r.updated_at)}</td></tr>`).join('') || `<tr><td colspan="9" class="empty">Nothing here.</td></tr>`}</tbody></table>`;
+    viewEl.querySelectorAll('th').forEach((th) => (th.onclick = () => { sort = { key: th.dataset.k, dir: sort.key === th.dataset.k ? -sort.dir : 1 }; renderList(); }));
+    viewEl.querySelectorAll('tr[data-id]').forEach((tr) => (tr.onclick = () => (location.href = `/requests/${tr.dataset.id}`)));
+  }
+
+  function render() { view === 'list' ? renderList() : renderKanban(); }
+
+  async function load() {
+    try {
+      rows = (await IM.api('/api/requests')).requests;
+      if (!dragging) render();
+      document.getElementById('updated').textContent = `Updated ${new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+    } catch (e) { IM.toast(e.message, true); }
+  }
+  await load();
+  setInterval(() => { if (!document.hidden && !dragging && !document.querySelector('.modal-bg')) load(); }, 30000);
+})();
+</script>
+</body></html>

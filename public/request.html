@@ -1,0 +1,11 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=Inter:wght@400;500;600;700&display=swap"><link rel="stylesheet" href="/css/app.css"><link rel="icon" href="/img/icon.svg"><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/img/icon-192.png"><meta name="theme-color" content="#005D63"><title>Request · Inkmule Proofs</title></head>
+<body><main class="page wide" style="max-width:1280px"><a href="/board" class="small">← Board</a><div id="detail" style="margin-top:10px"><div class="empty"><span class="spin"></span></div></div></main>
+<script src="/js/core.js"></script><script src="/js/form.js"></script><script src="/js/detail.js"></script>
+<script>
+IM.topbar('board').then(async () => {
+  const id = location.pathname.split('/').pop();
+  try { await IM.RequestDetail(document.getElementById('detail'), id); document.title = document.querySelector('h1').textContent + ' · Inkmule Proofs'; }
+  catch (e) { document.getElementById('detail').innerHTML = '<div class="empty">' + IM.esc(e.message) + '</div>'; }
+});
+</script>
+</body></html>
